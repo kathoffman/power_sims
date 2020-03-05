@@ -1,0 +1,364 @@
+---
+title: "Writing your own Power Simulations in R"
+author: "Katherine Hoffman"
+date: 2019-12-31T21:13:14-05:00
+categories: ["R"]
+tags: ["R"]
+output: 
+  blogdown::html_page:
+    toc: true
+    smart: false
+    df_print: "paged"
+---
+
+***
+
+# TLDR
+
+- Statistical power is the proportion of times we reject the null hypothesis when the null hypothesis is false
+
+- We can estimate power for any hypothesis test by repeating our analysis many times and calculating the proportion of times we reject our null hypothesis
+
+- Skip to the [end of the post](#full-code-without-explanations) for `R` simulation code without text explanations
+
+***
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, results="asis", message=F, warning=F)
+```
+
+# A review of statistical power
+
+introduction
+
+***
+
+# Simulating one analysis
+
+We'll look at simulation examples using one of the most straightforward analyses: simple linear regression. Although you would never need to do a power calculation simulation for a simple linear regression because there is a formula for it, the concepts and code can easily be applied to a more complicated analysis in which formulas do not exist.
+
+We start by loading the packages needed for this analysis, and setting a seed for reproducible results:
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(broom)
+library(kableExtra)
+library(purrr)
+library(future.apply)
+library(furrr)
+```
+
+```{r}
+set.seed(7)
+```
+
+We will generate a data set with sample size `n` of `100` and a population mean `mu` of some measure equal to `50` with standard deviation of `10`. We'll randomly assign a treatment we'll call `A`, of which the true effect on these measures in our population is a difference, or `delta` of `5`.
+
+```{r}
+n <- 100
+mu <- 50
+sd <- 10
+delta <- 5
+A <- rep(c(0,1), each=n/2)
+```
+
+With these parameters set, it becomes easy to generate our outcome `Y` under the assumption that our measure of interest is a `r`andom variable `norm`ally distributed with mean `mu`, standard deviation `sd`. Our outcome changes a `delta` amount due to our treatment `A`.
+
+```{r}
+Y <- rnorm(n, mean = mu, sd = sd) + A*delta
+```
+
+We put our data of interest (the treatment assigned, `A`, and resultant outcome, `Y`) into a tibble/data frame.
+
+```{r}
+dat <- tibble(A, Y)
+```
+
+Then we can plot the distributions of the two groups as a sanity check.
+
+```{r, fig.height=4}
+dat %>%
+  group_by(A) %>% mutate(mean_Y = mean(Y)) %>% ungroup() %>%
+  mutate(A = factor(A, levels=0:1, labels=c("control","treatment"))) %>%
+  ggplot(aes(Y, col=A)) +
+  geom_density(alpha=.5) +
+  geom_vline(aes(xintercept=mean_Y, col=A),
+            linetype="dashed") +
+  ggtitle("Distribution of Y under Treatment and Control") +
+  theme_classic() +
+  scale_y_continuous(expand=c(0,0)) 
+```
+
+We see the distributions of both the treatment and control groups look normally distributed, and the treated group has a higher mean.
+
+We can fit a linear model for our outcome given treatment and see the estimate of our treatment effect from this data set is `r lm(Y ~ A, data = dat) %>% tidy %>% filter(term == "A") %>% pull(estimate) %>% round(3)`. At an alpha level of 0.05, we would fail to reject our null hypothesis because the p-value is `r lm(Y ~ A, data = dat) %>% tidy %>% filter(term == "A") %>% pull(p.value) %>% round(3)`.
+
+```{r}
+fit <- lm(Y ~ A, data = dat)
+fit %>% tidy %>% kable(digits=3)
+```
+
+However, if we were to resample our data again, the next time we may randomly draw samples that, after fitting our linear model, *do* give us enough evidence to reject the null hypothesis:
+
+```{r}
+Y <- rnorm(n, mean = mu, sd = sd) + A*delta
+fit <- lm(Y ~ A)
+fit %>% tidy %>% kable(digits=3)
+```
+
+If we were to estimate our statistical power based off of these two simulations, we'd calculate it to be 50%, because 1/2 of our simulations yielded a decision to reject our null hypothesis (and our null hypothesis is indeed false). This would be a terrible estimate of power, though! We need to simulate the same analysis many times in order to actually get a good estimate for power.
+
+***
+
+# Simulating power for one analysis
+
+We'll start by clearing our working directory. You could alternatively restart `R`.
+
+```{r}
+rm(list=ls())
+```
+
+Next, let's decide what our `alpha`, or the Type I error rate we're willing to accept, should be. This is usually `0.05`. We will also set our `n`umber of `sim`ulation`s` to be `500`.
+
+```{r}
+alpha <- .05
+nsims <- 500
+```
+
+Next, we need to initiate an empty object to hold the results of our simulations. It's good practice to think about what information you actually want to save from each simulation run. In this case, I am only concerned with whether the p-value of my regression is less than my `alpha`. Therefore, I initiate an empty vector to hold my `sig`nificance decision after every simulation.
+
+```{r}
+sig <- c()
+```
+
+Next, let's generate the fixed parts of our simulation, like sample size, population mean, true effect size, and treatment assignments.
+
+```{r}
+n <- 100
+mu <- 50
+sd <- 10
+delta <- 5
+A <- rep(c(0, 1), each = n / 2) 
+```
+
+Now it's time to simulate!
+
+When I learn something new involving iteration, it's often *really* helpful for me to see it in a for-loop instead of a function. For this reason I'm showing my simulation examples first in a for-loop, but just below you'll find the equivalent code in `lapply` and `purrr`.
+
+This for-loop is saying that every time we run a simulation, we're going to generate new data (here, just a new outcome), save that data to a tibble and fit a linear model, pull the p-value for `A` from the fit object, and then save  in our `sig`nificance vector whether or not the p-value was less than our `alpha`.
+
+```{r}
+for (i in 1:nsims){
+  Y <- rnorm(n, mean = mu, sd = sd) + A*delta
+  dat <- tibble(A, Y)
+  fit <- lm(Y~A, data=dat)
+  p_val <- fit %>% tidy %>% filter(term == "A") %>% pull(p.value)
+  sig[i] <- p_val <= alpha
+}
+```
+
+After running that for-loop we have a `sig`nificance vector, which has the same length as our number of simulations, and tells us whether we rejected the null hypothesis at each simulation.
+
+```{r}
+print(head(sig))
+```
+
+So, that means to calculate our power, we just need to calculate the proportion of times we rejected the null hypothesis (since our null hypothesis that the treatment effect is zero, is in fact false).
+
+That's easy, we take the mean!
+
+```{r}
+power <- mean(sig)
+power
+```
+
+So we interpret the result of our power simulation as "with treatment assigned equally and randomly to `n=100` observations, and a true treatment effect size of `5` on a population mean of `50` with a standard deviation of `10`, our simple linear regression analysis has `r paste0(round(power*100),"%")` power to detect the true treatment effect."
+
+The equivalent way to do this using `lapply` or `purrr` would be to make a function containing everything in your for-loop before you save the relevant power information. Let's clear our working directory and see what that function would look like.
+
+```{r}
+rm(list=ls())
+```
+
+
+```{r}
+slr_sig <- function(n, mu, sd, delta, alpha){
+  A <- rep(c(0,1), each=n/2)
+  Y <- rnorm(n, mean = mu, sd = sd) + A*delta
+  dat <- tibble(A, Y)
+  fit <- lm(Y~A, data=dat)
+  p_val <- fit %>% tidy %>% filter(term == "A") %>% pull(p.value)
+  return(p_val <= alpha)
+}
+```
+
+Then, we can apply or map our function over however many simulations we want to do, and every time it will return whether or not our p-value was less than our alpha.
+
+Using `purrr`'s `map()` or base `R`'s `lapply()`, we run our new `slr_sig` function `nsims` times. We can then unlist our results (since both functions output a list), and take the mean of that `sig`nificance vector to get our power, just as we did with the for-loop.
+
+```{r}
+nsims <- 500
+sig <- map(1:nsims, ~slr_sig(n=100, mu=50, sd=10, delta=5, alpha=.05)) %>% unlist()
+mean(sig)
+sig <- lapply(1:nsims, function(i) slr_sig(n=100, mu=50, sd=10, delta=5, alpha=.05)) %>% unlist()
+mean(sig)
+```
+
+If we were to increase our simulations, our power estimates would gradually converge.
+
+# Simulating the power curve over sample size
+
+In the introduction at the beginning of this post, we discussed the four main aspects of power. Let's fix our effect size to remain 5, but vary our sample size `n`.
+
+We can do this in a nesting for-loop by just wrapping a `j`th element for `n` around our previous for-loop. At the end of every `i`th iteration we'll save the mean of the `sig`nificance vector for that `n` size and then we can look at the estimates for `power` for every `n` size` in a table or graph.
+
+```{r}
+alpha <- .05 # type I error rate
+sims <- 500 # number of simulations
+sign <- c() # an empty vector to hold the results of the significance test
+n_sizes <- seq(10, 200, by=10)
+power <- c()
+
+for (j in 1:length(n_sizes)){
+  n <- n_sizes[j]
+  for(i in 1:sims){
+    mu <- 50 # population mean of controls
+    sd <- 10 # standard deviation of the population
+    delta <- 5 # treatment effect size 
+    A <- rep(c(0,1), each=n/2) # treatment assignments, assuming equal group sizes
+    Y <- rnorm(n, mean = mu, sd = sd) + A*delta
+    dat <- tibble(A, Y)
+    fit <- lm(Y~A, data=dat)
+    p_val <- summary(fit)$coefficients[2,4] # save the p-value
+    sign[i] <- p_val <= alpha # to save whether the p-value is less than .05
+  }
+  power[j] <- mean(sign)
+}
+```
+
+```{r}
+p_curve <- tibble(n_sizes, power)
+kable(p_curve)
+
+ggplot(p_curve, aes(n_sizes, power)) +
+  geom_line() + 
+  labs(x="Sample Size (n)", y="Power",
+       title="Power Curve for Linear Regression of a Binary Treatment") +
+  ylim(0,1) +
+  geom_hline(yintercept = .8, linetype="dashed") + theme_classic()
+```
+
+
+Alternatively, and admittedly in a much cleaner fashion, we can use our previous function and just add an argument for `n`. Then, we can use another `for-loop`, or, better yet, an iterative function like `map`.
+
+
+
+Sometimes we want to know what our power will be 
+
+```{r}
+slr_n_sig <- function(n, mu, sd, delta, alpha){
+  A <- rep(c(0,1), each=n/2)
+  Y <- rnorm(n, mean = mu, sd = sd) + A*delta
+  dat <- tibble(A, Y)
+  fit <- lm(Y~A, data=dat)
+  p_val <- fit %>% tidy %>% filter(term == "A") %>% pull(p.value)
+  return(tibble(n = n, sig = p_val <= alpha))
+}
+
+map(1:2, ~imap(c(100,200), ~slr_n_sig(n=.x, mu=50, sd=10, delta=5, alpha=.05)))
+```
+
+
+```{r}
+
+rm(list=ls()) 
+alpha <- .05 # type I error rate
+sims <- 500 # number of simulations
+sign <- c() # an empty vector to hold the results of the significance test
+n_sizes <- seq(10, 200, by=10)
+power <- c()
+
+for (j in 1:length(n_sizes)){
+  n <- n_sizes[j]
+  for(i in 1:sims){
+    mu <- 50 # population mean of controls
+    sd <- 10 # standard deviation of the population
+    delta <- 5 # treatment effect size 
+    A <- rep(c(0,1), each=n/2) # treatment assignments, assuming equal group sizes
+    Y <- rnorm(n, mean = mu, sd = sd) + A*delta
+    dat <- tibble(A, Y)
+    fit <- lm(Y~A, data=dat)
+    p_val <- summary(fit)$coefficients[2,4] # save the p-value
+    sign[i] <- p_val <= alpha # to save whether the p-value is less than .05
+  }
+  power[j] <- mean(sign)
+}
+
+p_curve <- tibble(n_sizes, power)
+kable(p_curve)
+
+ggplot(p_curve, aes(n_sizes, power)) +
+  geom_line() + 
+  labs(x="Sample Size (n)", y="Power",
+       title="Power Curve for Linear Regression of a Binary Treatment") +
+  ylim(0,1) +
+  geom_hline(yintercept = .8, linetype="dashed") + theme_classic()
+
+```
+
+
+# Simulating power curves for many sample and effect sizes
+
+```{r}
+
+# Vary the sample and effect sizes ------------------------------------------
+
+rm(list=ls()) 
+alpha <- .05 # type I error rate
+sims <- 200 # number of simulations
+sign <- c() # an empty vector to hold the results of the significance test
+n_sizes <- seq(10, 200, by=10)
+deltas <- c(3,5,8)
+power_table <- tibble(delta = rep(deltas, each=length(n_sizes)),
+                      n = rep(n_sizes, times = length(deltas)),
+                      power = rep(NA)) # table to keep track of our power
+count <- 0 # to keep track of each n and delta combo
+
+for (k in 1:length(deltas)){
+  delta <- deltas[k]
+for (j in 1:length(n_sizes)){
+  n <- n_sizes[j]
+  count <- count+1
+for (i in 1:sims){
+    mu <- 50 # population mean of controls
+    sd <- 10 # standard deviation of the population
+    A <- rep(c(0,1), each=n/2) # treatment assignments, assuming equal group sizes
+    Y <- rnorm(n, mean = mu, sd = sd) + A*delta
+    dat <- tibble(A, Y)
+    fit <- lm(Y~A, data=dat)
+    p_val <- summary(fit)$coefficients[2,4] # save the p-value
+    sign[i] <- p_val <= alpha # to save whether the p-value is less than .05
+}
+  power_table[count,"power"] <- mean(sign) # record power for each delta and n combo
+  print(count) # helpful to check on sim status
+}
+}
+
+kable(head(power_table))
+
+# Plot the three different power curves (one for each delta)
+ggplot(power_table, aes(n, power, col=factor(delta), group=factor(delta))) +
+  geom_line() + 
+  labs(x="Sample Size (n)", y="Power",
+       title="Power Curve for Linear Regression of a Binary Treatment",
+       col = "Effect Size") +
+  ylim(0,1) +
+  geom_hline(yintercept = .8, linetype="dashed") +
+  theme_classic()
+
+
+```
+
+
+#Full code without explanations
